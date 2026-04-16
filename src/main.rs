@@ -94,9 +94,10 @@ async fn cache_html(client: Client, mut url: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn page_view(cx:&mut Context)->AnyFlexChild<Context>{
+fn page_view() ->AnyFlexChild<Context>{
     let mut seq: Vec<Option<AnyFlexChild<Context>>> = Vec::new();
     parse_html(&mut seq).expect("Couldn't parse HTML!");
+    //zstack(seq)
     flex_col(portal(flex_col(seq))).into_any_flex()
 }
 
@@ -112,6 +113,7 @@ fn settings_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
         )
             .width(550.px())
             .height(350.px())
+            .background_color(Color::from_rgba8(50, 50, 50, 50))
             .corner_radius(5.)
             .border(Color::WHITE, 2.)
             .into_any_flex());
@@ -153,7 +155,7 @@ fn logic(cx: &mut Context) -> impl Iterator<Item = WindowView<Context>> + use<> 
             });
         })
         .placeholder("Search or enter an address"),
-        page_view(cx)
+        page_view()
     ));
     let root = zstack((
         zstack_item(main_view, ChildAlignment::SelfAligned(UnitPoint::TOP)),
