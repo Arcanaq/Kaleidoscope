@@ -1,18 +1,18 @@
+mod widgets;
+
 use futures_util::StreamExt;
-use reqwest::{Client, header};
+use reqwest::{header, Client};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
-use tl::parse;
+use tl::{parse, Node, Parser};
 use tokio::fs;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use xilem::masonry::properties::types::{AsUnit, UnitPoint};
 use xilem::style::{Padding, Style};
-use xilem::view::{
-    AnyFlexChild, ChildAlignment, CrossAxisAlignment, FlexExt, flex_col, flex_row, label,
-    sized_box, slider, text_button, text_input, zstack, zstack_item,
-};
-use xilem::{AppState, Color, EventLoop, WidgetView, WindowId, WindowView, Xilem, window};
+use xilem::view::{flex_col, flex_row, label, portal, sized_box, slider, text_button, text_input, zstack, zstack_item, AnyFlexChild, ChildAlignment, CrossAxisAlignment, FlexExt};
+use xilem::{window, AppState, Color, EventLoop, WidgetView, WindowId, WindowView, Xilem};
 
 struct Context {
     running: bool,
@@ -35,19 +35,42 @@ impl AppState for Context {
     }
 }
 
-async fn parse_html()->Result<(), Box<dyn std::error::Error>>{
+fn parse_node(seq: &mut Vec<Option<AnyFlexChild<Context>>>, node:&Node, parser:&Parser){
+    match node{
+        Node::Tag(tag)=>{
+            seq.push(widgets::to_widget(tag, parser));
+            for handle in tag.children().top().iter(){
+                match handle.get(parser) {
+                    Some(node) => {
+                        parse_node(seq, node, parser)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Node::Comment(comment)=>{
+            println!("{}", comment.as_utf8_str())
+        }
+        Node::Raw(_)=>{}
+    }
+}
+
+fn parse_html(seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn std::error::Error>>{
     let content = {
-        let file = File::open("cache/sites/current_site.html").await;
+        let mut file = File::open("cache/sites/current_site.html")?;
         let mut content = String::new();
-        file?
-            .read_to_string(&mut content).await.expect("Couldn't read file!");
+        file.read_to_string(&mut content)?;
         content
     };
     let dom = parse(&content, tl::ParserOptions::default())?;
     let parser = dom.parser();
-    for e in dom.query_selector("p").unwrap(){
-        let txt = e.get(parser).unwrap().inner_html(parser);
-        println!("{}", txt);
+    for handle in dom.children(){
+        match handle.get(parser) {
+            Some(node) => {
+                parse_node(seq, node, parser)
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -60,7 +83,7 @@ async fn cache_html(client: Client, mut url: &str) -> Result<(), Box<dyn std::er
         .await
         .expect("Couldn't create cache directory.");
     path.push("current_site.html");
-    let mut file = File::create(path).await?;
+    let mut file = fs::File::create(path).await?;
     let mut stream = res.bytes_stream();
     while let Some(chunk_res) = stream.next().await {
         let chunk = chunk_res?;
@@ -71,23 +94,29 @@ async fn cache_html(client: Client, mut url: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn settings_view(cx: &mut Context) -> AnyFlexChild<Context> {
+fn page_view(cx:&mut Context)->AnyFlexChild<Context>{
+    let mut seq: Vec<Option<AnyFlexChild<Context>>> = Vec::new();
+    parse_html(&mut seq).expect("Couldn't parse HTML!");
+    flex_col(portal(flex_col(seq))).into_any_flex()
+}
+
+fn settings_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
     if cx.opened_settings {
-        return sized_box(
+        return Some(sized_box(
             flex_col((
                 label("Window Alpha"),
                 slider(0., 1., cx.alpha, |cx: &mut Context, input| cx.alpha = input).step(0.1),
             ))
-            .cross_axis_alignment(CrossAxisAlignment::Start)
-            .padding(Padding::all(5.)),
+                .cross_axis_alignment(CrossAxisAlignment::Start)
+                .padding(Padding::all(5.)),
         )
-        .width(550.px())
-        .height(350.px())
-        .corner_radius(5.)
-        .border(Color::WHITE, 2.)
-        .into_any_flex();
+            .width(550.px())
+            .height(350.px())
+            .corner_radius(5.)
+            .border(Color::WHITE, 2.)
+            .into_any_flex());
     }
-    label("").into_any_flex() // there's probably a better way to get an empty element
+    None
 }
 
 fn title_bar() -> impl WidgetView<Context> + use<> {
@@ -124,11 +153,7 @@ fn logic(cx: &mut Context) -> impl Iterator<Item = WindowView<Context>> + use<> 
             });
         })
         .placeholder("Search or enter an address"),
-        text_button("Refresh", |cx:&mut Context| {
-            tokio::spawn(async move {
-                parse_html().await.expect("Couldn't parse HTML!");
-            });
-        })
+        page_view(cx)
     ));
     let root = zstack((
         zstack_item(main_view, ChildAlignment::SelfAligned(UnitPoint::TOP)),
@@ -153,7 +178,7 @@ fn logic(cx: &mut Context) -> impl Iterator<Item = WindowView<Context>> + use<> 
             flex_col((
                 label("other window"),
                 label("wow"),
-                text_button("button that does nothing", |cx: &mut Context| {}),
+                text_button("button that does nothing", |_cx: &mut Context| {}),
             )),
         )
         .with_base_color(base_color)
@@ -174,7 +199,7 @@ fn close(cx: &mut Context) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    File::create("config.toml").await?;
+    fs::File::create("config.toml").await?;
     let client = {
         let mut headers = header::HeaderMap::new();
         headers.insert(
