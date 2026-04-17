@@ -1,14 +1,16 @@
+use std::io::Seek;
+use std::io::Write;
 mod widgets;
 
-use futures_util::StreamExt;
+use futures_util::{TryFutureExt};
 use reqwest::{header, Client};
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, SeekFrom};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tl::{parse, Node, Parser};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use xilem::masonry::properties::types::{AsUnit, UnitPoint};
 use xilem::style::{Padding, Style};
 use xilem::view::{flex_col, flex_row, label, portal, sized_box, slider, text_button, text_input, zstack, zstack_item, AnyFlexChild, ChildAlignment, CrossAxisAlignment, FlexExt};
@@ -55,7 +57,7 @@ fn parse_node(seq: &mut Vec<Option<AnyFlexChild<Context>>>, node:&Node, parser:&
     }
 }
 
-fn parse_html(seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn std::error::Error>>{
+fn parse_html(seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn Error>>{
     let content = {
         let mut file = File::open("cache/sites/current_site.html")?;
         let mut content = String::new();
@@ -75,30 +77,59 @@ fn parse_html(seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn
     Ok(())
 }
 
-async fn cache_html(client: Client, mut url: &str) -> Result<(), Box<dyn std::error::Error>> {
+const CHUNK_SIZE:u64 = 1024*8;
+
+async fn cache_chunk(file: Arc<Mutex<File>>, cli: Client, url:String, start:u64, end:u64) ->Result<(), Box<dyn Error>>{
+    let res = cli.get(&url).header("Range", format!("bytes={start}-{end}"))
+        .send()
+        .map_err(|e| format!("Request failed: {e}")).await?
+        .bytes()
+        .map_err(|e| format!("Failed to read bytes {e}")).await?;
+    let mut file = file.lock().map_err(|e| format!("Mutex lock failed {e}"))?;
+    file.seek(SeekFrom::Start(start)).map_err(|e| format!("Seek failed {e}"))?;
+    file.write_all(&res).map_err(|e| format!("Write failed {e}"))?;
+    Ok(())
+}
+async fn cache_html(cli: Client, mut url: &str) -> Result<(), Box<dyn Error>> {
     url = url.trim();
-    let res = client.get(url).send().await?;
-    let mut path = PathBuf::from("cache/sites");
-    fs::create_dir_all(&path)
+    let res = cli.get(url).send().await?;
+    let size = res.headers().get("content-length").ok_or("Content-Length header missing")?.to_str()?.parse::<u64>()?;
+    let mut path = PathBuf::from("cache");
+    path.push("sites");
+    tokio::fs::create_dir_all(&path)
         .await
         .expect("Couldn't create cache directory.");
     path.push("current_site.html");
-    let mut file = fs::File::create(path).await?;
-    let mut stream = res.bytes_stream();
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res?;
-        file.write_all(&chunk)
-            .await
-            .expect("Couldn't write to HTML cache.");
+    let file = File::create(path)?;
+    let file = Arc::new(Mutex::new(file));
+    let mut handles = vec![];
+    for start in (0..size).step_by(CHUNK_SIZE as usize){
+        let end = (start + CHUNK_SIZE - 1).min(size - 1);
+        let cli = cli.clone();
+        let file = Arc::clone(&file);
+        let url = url.to_string();
+        let handle = tokio::spawn(async move{
+            match cache_chunk(file, cli, url, start, end).await{
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        });
+        handles.push(handle)
     }
     Ok(())
 }
 
-fn page_view() ->AnyFlexChild<Context>{
+fn page_view() -> Option<AnyFlexChild<Context>> {
     let mut seq: Vec<Option<AnyFlexChild<Context>>> = Vec::new();
-    parse_html(&mut seq).expect("Couldn't parse HTML!");
-    //zstack(seq)
-    flex_col(portal(flex_col(seq))).into_any_flex()
+    let res = parse_html(&mut seq);
+    match res{
+        Ok(_) => Some(
+            sized_box(portal(flex_col(seq)))
+                .padding(15.)
+                .into_any_flex()
+        ),
+        Err(_) => None
+    }
 }
 
 fn settings_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
@@ -113,6 +144,7 @@ fn settings_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
         )
             .width(550.px())
             .height(350.px())
+            .padding(15.)
             .background_color(Color::from_rgba8(50, 50, 50, 50))
             .corner_radius(5.)
             .border(Color::WHITE, 2.)
@@ -200,8 +232,8 @@ fn close(cx: &mut Context) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    fs::File::create("config.toml").await?;
+async fn main() -> Result<(), Box<dyn Error>> {
+    tokio::fs::File::create("config.toml").await?;
     let client = {
         let mut headers = header::HeaderMap::new();
         headers.insert(

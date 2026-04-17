@@ -1,8 +1,8 @@
 use crate::Context;
 use tl::{HTMLTag, Parser};
-use xilem::{palette, Color};
 use xilem::style::{Padding, Style};
-use xilem::view::{button, inline_prose, label, sized_box, text_button, AnyFlexChild, FlexExt};
+use xilem::view::{button, inline_prose, label, sized_box, AnyFlexChild, FlexExt};
+use xilem::{palette, Color};
 
 pub(crate) fn to_widget(tag:&HTMLTag, parser:&Parser) ->Option<AnyFlexChild<Context>>{
     match tag.name().as_utf8_str().as_ref(){
@@ -24,6 +24,6 @@ pub(crate) fn to_widget(tag:&HTMLTag, parser:&Parser) ->Option<AnyFlexChild<Cont
         "hr"=>Some(
             label("___________________________________________________________________________").into_any_flex()
         ),
-        unknown => {println!("{}", unknown);None}
+        unknown => {/*println!("{}", unknown);*/None}
     }
 }
