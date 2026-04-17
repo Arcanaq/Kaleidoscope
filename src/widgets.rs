@@ -4,8 +4,12 @@ use xilem::style::{Padding, Style};
 use xilem::view::{button, inline_prose, label, sized_box, AnyFlexChild, FlexExt};
 use xilem::{palette, Color};
 
-pub(crate) fn to_widget(tag:&HTMLTag, parser:&Parser) ->Option<AnyFlexChild<Context>>{
+pub(crate) fn to_widget(cx: &mut Context, tag:&HTMLTag, parser:&Parser) ->Option<AnyFlexChild<Context>>{
     match tag.name().as_utf8_str().as_ref(){
+        "title"=>{
+            cx.title = tag.inner_html(parser);
+            None
+        }
         "p"|"h1"|"h2"|"h3"|"h4"|"h5"|"h6"=>Some(
             inline_prose(tag.inner_text(parser)).into_any_flex()
         ),
@@ -24,6 +28,6 @@ pub(crate) fn to_widget(tag:&HTMLTag, parser:&Parser) ->Option<AnyFlexChild<Cont
         "hr"=>Some(
             label("___________________________________________________________________________").into_any_flex()
         ),
-        unknown => {/*println!("{}", unknown);*/None}
+        unknown => {println!("{}", unknown);None}
     }
 }

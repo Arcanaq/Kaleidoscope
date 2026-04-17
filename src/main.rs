@@ -23,6 +23,7 @@ struct Context {
     sub_windows: HashMap<WindowId, SubContext>,
     client: Client,
     next_url: String,
+    title:String,
     opened_settings: bool,
     alpha: f64,
 }
@@ -35,46 +36,6 @@ impl AppState for Context {
     fn keep_running(&self) -> bool {
         self.running
     }
-}
-
-fn parse_node(seq: &mut Vec<Option<AnyFlexChild<Context>>>, node:&Node, parser:&Parser){
-    match node{
-        Node::Tag(tag)=>{
-            seq.push(widgets::to_widget(tag, parser));
-            for handle in tag.children().top().iter(){
-                match handle.get(parser) {
-                    Some(node) => {
-                        parse_node(seq, node, parser)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Node::Comment(comment)=>{
-            println!("{}", comment.as_utf8_str())
-        }
-        Node::Raw(_)=>{}
-    }
-}
-
-fn parse_html(seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn Error>>{
-    let content = {
-        let mut file = File::open("cache/sites/current_site.html")?;
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        content
-    };
-    let dom = parse(&content, tl::ParserOptions::default())?;
-    let parser = dom.parser();
-    for handle in dom.children(){
-        match handle.get(parser) {
-            Some(node) => {
-                parse_node(seq, node, parser)
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 const CHUNK_SIZE:u64 = 1024*8;
@@ -94,8 +55,7 @@ async fn cache_html(cli: Client, mut url: &str) -> Result<(), Box<dyn Error>> {
     url = url.trim();
     let res = cli.get(url).send().await?;
     let size = res.headers().get("content-length").ok_or("Content-Length header missing")?.to_str()?.parse::<u64>()?;
-    let mut path = PathBuf::from("cache");
-    path.push("sites");
+    let mut path = PathBuf::from("cache/sites");
     tokio::fs::create_dir_all(&path)
         .await
         .expect("Couldn't create cache directory.");
@@ -109,19 +69,56 @@ async fn cache_html(cli: Client, mut url: &str) -> Result<(), Box<dyn Error>> {
         let file = Arc::clone(&file);
         let url = url.to_string();
         let handle = tokio::spawn(async move{
-            match cache_chunk(file, cli, url, start, end).await{
-                Ok(_) => {}
-                Err(_) => {}
-            }
+            let _= cache_chunk(file, cli, url, start, end).await;
         });
         handles.push(handle)
     }
     Ok(())
 }
 
-fn page_view() -> Option<AnyFlexChild<Context>> {
+fn parse_node(cx: &mut Context, seq: &mut Vec<Option<AnyFlexChild<Context>>>, node:&Node, parser:&Parser){
+    match node{
+        Node::Tag(tag)=>{
+            seq.push(widgets::to_widget(cx, tag, parser));
+            for handle in tag.children().top().iter(){
+                match handle.get(parser) {
+                    Some(node) => {
+                        parse_node(cx, seq, node, parser)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Node::Comment(comment)=>{
+            println!("{}", comment.as_utf8_str())
+        }
+        Node::Raw(_)=>{}
+    }
+}
+
+fn parse_html(cx: &mut Context, seq: &mut Vec<Option<AnyFlexChild<Context>>>) ->Result<(), Box<dyn Error>>{
+    let content = {
+        let mut file = File::open("cache/sites/current_site.html")?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        content
+    };
+    let dom = parse(&content, tl::ParserOptions::default())?;
+    let parser = dom.parser();
+    for handle in dom.children(){
+        match handle.get(parser) {
+            Some(node) => {
+                parse_node(cx, seq, node, parser)
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn page_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
     let mut seq: Vec<Option<AnyFlexChild<Context>>> = Vec::new();
-    let res = parse_html(&mut seq);
+    let res = parse_html(cx, &mut seq);
     match res{
         Ok(_) => Some(
             sized_box(portal(flex_col(seq)))
@@ -153,16 +150,18 @@ fn settings_view(cx: &mut Context) -> Option<AnyFlexChild<Context>> {
     None
 }
 
-fn title_bar() -> impl WidgetView<Context> + use<> {
-    flex_row(text_button("Config", |cx: &mut Context| {
+fn title_bar(cx: &mut Context) -> impl WidgetView<Context> + use<> {
+    flex_row((
+        label(format!("{}", cx.title)),
+        text_button("Config", |cx: &mut Context| {
         cx.opened_settings = !cx.opened_settings
-    }))
+    })))
 }
 
 fn logic(cx: &mut Context) -> impl Iterator<Item = WindowView<Context>> + use<> {
     let base_color = Color::new([0., 0., 0., cx.alpha as f32]);
     let main_view = flex_col((
-        title_bar(),
+        title_bar(cx),
         text_input(cx.next_sub_window.clone(), |cx: &mut Context, input| {
             cx.next_sub_window = input
         })
@@ -187,7 +186,7 @@ fn logic(cx: &mut Context) -> impl Iterator<Item = WindowView<Context>> + use<> 
             });
         })
         .placeholder("Search or enter an address"),
-        page_view()
+        page_view(cx)
     ));
     let root = zstack((
         zstack_item(main_view, ChildAlignment::SelfAligned(UnitPoint::TOP)),
@@ -252,6 +251,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         sub_windows: HashMap::new(),
         client,
         next_url: String::new(),
+        title:"Home".to_string(),
         opened_settings: false,
         alpha: 0.5,
     };
